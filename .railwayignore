@@ -1,0 +1,13 @@
+node_modules/
+.env
+.env.local
+.env.*.local
+*.log
+logs/
+.DS_Store
+.git/
+.gitignore
+README.md
+RAILWAY_DEPLOYMENT.md
+scripts/
+
