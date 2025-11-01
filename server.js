@@ -23,12 +23,10 @@ const PORT = process.env.PORT || 3001;
 const MONGODB_URI = process.env.MONGODB_URI || 'mongodb://localhost:27017/darigo-real-estate';
 
 const mongooseOptions = {
-  useNewUrlParser: true,
-  useUnifiedTopology: true,
   maxPoolSize: 10,
-  serverSelectionTimeoutMS: 5000,
+  serverSelectionTimeoutMS: 30000, // زيادة الوقت لانتظار الاتصال
   socketTimeoutMS: 45000,
-  bufferCommands: false,
+  bufferCommands: true, // تفعيل buffer للسماح بانتظار الاتصال
   retryWrites: true,
   w: 'majority'
 };
@@ -1581,12 +1579,34 @@ app.use('*', (req, res) => {
 const startServer = async () => {
   try {
     console.log('🚀 بدء تشغيل الخادم...');
-    await connectDatabase();
+    
+    // الاتصال بقاعدة البيانات أولاً (مهم جداً!)
+    const dbConnected = await connectDatabase();
+    
+    if (!dbConnected) {
+      console.error('❌ فشل الاتصال بقاعدة البيانات. الخادم لن يبدأ.');
+      process.exit(1);
+    }
+    
+    // الانتظار قليلاً للتأكد من اكتمال الاتصال
+    if (mongoose.connection.readyState !== 1) {
+      console.log('⏳ انتظار اكتمال الاتصال بقاعدة البيانات...');
+      await new Promise((resolve) => {
+        const checkConnection = () => {
+          if (mongoose.connection.readyState === 1) {
+            resolve();
+          } else {
+            setTimeout(checkConnection, 500);
+          }
+        };
+        checkConnection();
+      });
+    }
     
     app.listen(PORT, '0.0.0.0', () => {
       console.log(`✅ الخادم يعمل على المنفذ ${PORT}`);
       console.log(`🌐 رابط الخادم: http://localhost:${PORT}`);
-      console.log(`📊 حالة قاعدة البيانات: ${mongoose.connection.readyState === 1 ? 'متصل' : 'غير متصل'}`);
+      console.log(`📊 حالة قاعدة البيانات: ${mongoose.connection.readyState === 1 ? '✅ متصل' : '❌ غير متصل'}`);
       console.log('🔗 المسارات المتاحة:');
       console.log('   - POST /api/auth/register - تسجيل مستخدم جديد');
       console.log('   - POST /api/auth/login - تسجيل الدخول');
