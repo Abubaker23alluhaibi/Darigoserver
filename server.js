@@ -136,7 +136,7 @@ const userSchema = new mongoose.Schema({
   updatedAt: { type: Date, default: Date.now }
 }, { timestamps: true });
 
-userSchema.index({ email: 1 });
+// email لديه unique: true والذي ينشئ index تلقائياً، لا حاجة لإضافة index مرة أخرى
 userSchema.index({ phone: 1 });
 userSchema.index({ userType: 1 });
 
@@ -509,8 +509,8 @@ app.use(cors({
       ];
     }
     
-    // السماح بطلبات بدون origin (مثل Postman، أو من Railway health checks)
-    if (!origin) {
+    // السماح بطلبات بدون origin (مثل Postman، أو من Railway health checks، أو file://)
+    if (!origin || origin === 'null') {
       return callback(null, true);
     }
     
@@ -527,7 +527,14 @@ app.use(cors({
       return origin === allowed;
     });
     
-    if (isAllowed || isRailwayDomain) {
+    // السماح بـ localhost و 127.0.0.1 على أي منفذ
+    const isLocalhost = origin.startsWith('http://localhost:') || 
+                        origin.startsWith('http://127.0.0.1:') ||
+                        origin.startsWith('http://192.168.') ||
+                        origin.startsWith('http://10.0.') ||
+                        origin.startsWith('http://172.');
+    
+    if (isAllowed || isRailwayDomain || isLocalhost) {
       callback(null, true);
     } else {
       console.warn(`⚠️ CORS: Origin غير مسموح: ${origin}`);
