@@ -7,12 +7,31 @@ import jwt from 'jsonwebtoken';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import { dirname } from 'path';
+import helmet from 'helmet';
+import rateLimit from 'express-rate-limit';
+import mongoSanitize from 'mongo-sanitize';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
 
 // تحميل متغيرات البيئة
 dotenv.config();
+
+// ============================================
+// LOGGING HELPER (للإنتاج)
+// ============================================
+const isProduction = process.env.NODE_ENV === 'production';
+const logger = {
+  log: (...args) => {
+    if (!isProduction) console.log(...args);
+  },
+  error: (...args) => {
+    console.error(...args); // الأخطاء دائماً تظهر
+  },
+  warn: (...args) => {
+    if (!isProduction) console.warn(...args);
+  }
+};
 
 const app = express();
 const PORT = process.env.PORT || 3001;
@@ -44,23 +63,23 @@ if (isAtlas) {
 const connectDatabase = async () => {
   try {
     if (mongoose.connection.readyState === 1) {
-      console.log('✅ قاعدة البيانات متصلة بالفعل');
+      logger.log('✅ قاعدة البيانات متصلة بالفعل');
       return true;
     }
 
-    console.log('🚀 بدء الاتصال بقاعدة البيانات...');
-    console.log(`🔗 نوع الاتصال: ${isAtlas ? 'سحابي (Atlas)' : 'محلي'}`);
+    logger.log('🚀 بدء الاتصال بقاعدة البيانات...');
+    logger.log(`🔗 نوع الاتصال: ${isAtlas ? 'سحابي (Atlas)' : 'محلي'}`);
     
     await mongoose.connect(MONGODB_URI, mongooseOptions);
     
-    console.log('✅ تم الاتصال بقاعدة البيانات بنجاح!');
-    console.log(`📊 قاعدة البيانات: ${mongoose.connection.name}`);
+    logger.log('✅ تم الاتصال بقاعدة البيانات بنجاح!');
+    logger.log(`📊 قاعدة البيانات: ${mongoose.connection.name}`);
     
     return true;
   } catch (error) {
-    console.error('❌ خطأ في الاتصال بقاعدة البيانات:', error.message);
+    logger.error('❌ خطأ في الاتصال بقاعدة البيانات:', error.message);
     setTimeout(() => {
-      console.log('🔄 محاولة إعادة الاتصال بقاعدة البيانات...');
+      logger.log('🔄 محاولة إعادة الاتصال بقاعدة البيانات...');
       connectDatabase();
     }, 5000);
     return false;
@@ -68,15 +87,15 @@ const connectDatabase = async () => {
 };
 
 mongoose.connection.on('connected', () => {
-  console.log('🟢 حالة الاتصال: متصل');
+  logger.log('🟢 حالة الاتصال: متصل');
 });
 
 mongoose.connection.on('error', (error) => {
-  console.error('🔴 خطأ في الاتصال:', error.message);
+  logger.error('🔴 خطأ في الاتصال:', error.message);
 });
 
 mongoose.connection.on('disconnected', () => {
-  console.log('🟡 حالة الاتصال: منقطع');
+  logger.log('🟡 حالة الاتصال: منقطع');
 });
 
 // ============================================
@@ -276,22 +295,68 @@ const Property = mongoose.models.Property || mongoose.model('Property', property
 const authenticateToken = async (req, res, next) => {
   try {
     const authHeader = req.headers['authorization'];
-    const token = authHeader && authHeader.split(' ')[1];
-
-    if (!token) {
+    
+    // التحقق من وجود Authorization header
+    if (!authHeader) {
       return res.status(401).json({
         status: 'error',
         message: 'الرمز المميز مطلوب للمصادقة'
       });
     }
 
-    const decoded = jwt.verify(token, process.env.JWT_SECRET || 'darigo-super-secret-key-change-this-in-production');
-    
-    const user = await User.findById(decoded.userId);
-    if (!user || !user.isActive) {
+    // التحقق من التنسيق (Bearer token)
+    const parts = authHeader.split(' ');
+    if (parts.length !== 2 || parts[0] !== 'Bearer') {
       return res.status(401).json({
         status: 'error',
-        message: 'الرمز المميز غير صالح أو المستخدم غير نشط'
+        message: 'تنسيق الرمز المميز غير صحيح'
+      });
+    }
+
+    const token = parts[1];
+
+    // التحقق من طول الرمز (حماية أساسية)
+    if (token.length < 10 || token.length > 500) {
+      return res.status(401).json({
+        status: 'error',
+        message: 'الرمز المميز غير صالح'
+      });
+    }
+
+    // استخدام JWT_SECRET من environment variable
+    const jwtSecret = process.env.JWT_SECRET;
+    if (!jwtSecret || jwtSecret === 'darigo-super-secret-key-change-this-in-production') {
+      logger.error('⚠️ JWT_SECRET غير معرّف بشكل صحيح!');
+      if (isProduction) {
+        return res.status(500).json({
+          status: 'error',
+          message: 'خطأ في إعدادات الخادم'
+        });
+      }
+    }
+
+    const decoded = jwt.verify(token, jwtSecret || 'darigo-super-secret-key-change-this-in-production');
+    
+    // التحقق من وجود userId في الرمز
+    if (!decoded.userId) {
+      return res.status(401).json({
+        status: 'error',
+        message: 'الرمز المميز غير صالح'
+      });
+    }
+
+    const user = await User.findById(decoded.userId);
+    if (!user) {
+      return res.status(401).json({
+        status: 'error',
+        message: 'المستخدم غير موجود'
+      });
+    }
+
+    if (!user.isActive) {
+      return res.status(401).json({
+        status: 'error',
+        message: 'الحساب غير نشط. يرجى الاتصال بالدعم'
       });
     }
 
@@ -303,10 +368,26 @@ const authenticateToken = async (req, res, next) => {
 
     next();
   } catch (error) {
-    console.error('خطأ في المصادقة:', error);
+    logger.error('خطأ في المصادقة:', error);
+    
+    // رسائل خطأ محددة
+    if (error.name === 'TokenExpiredError') {
+      return res.status(401).json({
+        status: 'error',
+        message: 'انتهت صلاحية الرمز المميز. يرجى تسجيل الدخول مرة أخرى'
+      });
+    }
+    
+    if (error.name === 'JsonWebTokenError') {
+      return res.status(401).json({
+        status: 'error',
+        message: 'الرمز المميز غير صالح'
+      });
+    }
+
     return res.status(401).json({
       status: 'error',
-      message: 'الرمز المميز غير صالح'
+      message: 'خطأ في التحقق من الرمز المميز'
     });
   }
 };
@@ -315,6 +396,7 @@ const authenticateToken = async (req, res, next) => {
 const validateRegistration = (req, res, next) => {
   const { name, email, phone, password, confirmPassword, userType, agencyName, licenseNumber } = req.body;
 
+  // التحقق من الحقول المطلوبة
   if (!name || !email || !phone || !password || !confirmPassword) {
     return res.status(400).json({
       status: 'error',
@@ -322,26 +404,54 @@ const validateRegistration = (req, res, next) => {
     });
   }
 
-  const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
-  if (!emailRegex.test(email)) {
+  // تنظيف وحماية من XSS
+  const sanitizeInput = (str) => {
+    if (typeof str !== 'string') return '';
+    return str.trim().replace(/<[^>]*>/g, ''); // إزالة HTML tags
+  };
+
+  const sanitizedName = sanitizeInput(name);
+  if (sanitizedName.length < 2 || sanitizedName.length > 100) {
+    return res.status(400).json({
+      status: 'error',
+      message: 'الاسم يجب أن يكون بين 2 و 100 حرف'
+    });
+  }
+
+  // التحقق من البريد الإلكتروني
+  const emailRegex = /^[a-zA-Z0-9._-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$/;
+  const sanitizedEmail = email.toLowerCase().trim();
+  if (!emailRegex.test(sanitizedEmail) || sanitizedEmail.length > 255) {
     return res.status(400).json({
       status: 'error',
       message: 'البريد الإلكتروني غير صحيح'
     });
   }
 
-  const phoneRegex = /^[0-9+\-\s()]+$/;
-  if (!phoneRegex.test(phone) || phone.length < 10) {
+  // التحقق من رقم الهاتف العراقي
+  const phoneRegex = /^(\+964|00964|0)?[7][0-9]{9}$/;
+  const sanitizedPhone = phone.replace(/\s+/g, ''); // إزالة المسافات
+  if (!phoneRegex.test(sanitizedPhone)) {
     return res.status(400).json({
       status: 'error',
-      message: 'رقم الهاتف غير صحيح'
+      message: 'رقم الهاتف العراقي غير صحيح (يجب أن يبدأ بـ 07 أو +964)'
     });
   }
 
-  if (password.length < 6) {
+  // التحقق من كلمة المرور
+  if (password.length < 8) {
     return res.status(400).json({
       status: 'error',
-      message: 'كلمة المرور يجب أن تكون 6 أحرف على الأقل'
+      message: 'كلمة المرور يجب أن تكون 8 أحرف على الأقل'
+    });
+  }
+
+  // التحقق من قوة كلمة المرور
+  const passwordRegex = /^(?=.*[a-z])(?=.*[A-Z])(?=.*\d).{8,}$/;
+  if (!passwordRegex.test(password) && password.length < 8) {
+    return res.status(400).json({
+      status: 'error',
+      message: 'كلمة المرور يجب أن تحتوي على حروف كبيرة وصغيرة وأرقام (8 أحرف على الأقل)'
     });
   }
 
@@ -352,6 +462,7 @@ const validateRegistration = (req, res, next) => {
     });
   }
 
+  // التحقق من نوع المستخدم
   if (userType && !['individual', 'agency'].includes(userType)) {
     return res.status(400).json({
       status: 'error',
@@ -359,13 +470,33 @@ const validateRegistration = (req, res, next) => {
     });
   }
 
+  // التحقق من معلومات المكتب
   if (userType === 'agency') {
-    if (!agencyName || !licenseNumber) {
+    const sanitizedAgencyName = sanitizeInput(agencyName || '');
+    const sanitizedLicenseNumber = sanitizeInput(licenseNumber || '');
+    
+    if (!sanitizedAgencyName || sanitizedAgencyName.length < 3 || sanitizedAgencyName.length > 200) {
       return res.status(400).json({
         status: 'error',
-        message: 'اسم المكتب ورقم الترخيص مطلوبان للمكاتب العقارية'
+        message: 'اسم المكتب يجب أن يكون بين 3 و 200 حرف'
       });
     }
+
+    if (!sanitizedLicenseNumber || sanitizedLicenseNumber.length < 5 || sanitizedLicenseNumber.length > 50) {
+      return res.status(400).json({
+        status: 'error',
+        message: 'رقم الترخيص يجب أن يكون بين 5 و 50 حرف'
+      });
+    }
+  }
+
+  // تحديث البيانات بعد التنظيف
+  req.body.name = sanitizedName;
+  req.body.email = sanitizedEmail;
+  req.body.phone = sanitizedPhone;
+  if (userType === 'agency') {
+    req.body.agencyName = sanitizeInput(agencyName);
+    req.body.licenseNumber = sanitizeInput(licenseNumber);
   }
 
   next();
@@ -469,6 +600,57 @@ const requireAdmin = async (req, res, next) => {
 };
 
 // ============================================
+// SECURITY MIDDLEWARE
+// ============================================
+
+// Helmet - Security Headers
+app.use(helmet({
+  contentSecurityPolicy: isProduction ? undefined : false, // تعطيل في التطوير لتسهيل التطوير
+  crossOriginEmbedderPolicy: false,
+  crossOriginResourcePolicy: { policy: "cross-origin" }
+}));
+
+// Rate Limiting - حماية من الهجمات
+const limiter = rateLimit({
+  windowMs: 15 * 60 * 1000, // 15 دقيقة
+  max: isProduction ? 100 : 1000, // 100 طلب في الإنتاج، 1000 في التطوير
+  message: {
+    status: 'error',
+    message: 'تم تجاوز الحد المسموح من الطلبات. يرجى المحاولة مرة أخرى لاحقاً.'
+  },
+  standardHeaders: true,
+  legacyHeaders: false,
+});
+
+// Rate Limiting للـ Auth endpoints (أكثر حماية)
+const authLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000, // 15 دقيقة
+  max: 5, // 5 محاولات فقط
+  message: {
+    status: 'error',
+    message: 'تم تجاوز الحد المسموح من محاولات تسجيل الدخول. يرجى المحاولة بعد 15 دقيقة.'
+  },
+  skipSuccessfulRequests: true, // لا نحسب الطلبات الناجحة
+});
+
+app.use('/api/', limiter); // تطبيق على جميع API endpoints
+app.use('/api/auth/', authLimiter); // حماية إضافية لـ Auth
+
+// Sanitize MongoDB - حماية من NoSQL Injection
+app.use((req, res, next) => {
+  if (req.body) {
+    req.body = mongoSanitize(req.body);
+  }
+  if (req.query) {
+    req.query = mongoSanitize(req.query);
+  }
+  if (req.params) {
+    req.params = mongoSanitize(req.params);
+  }
+  next();
+});
+
+// ============================================
 // APP MIDDLEWARE
 // ============================================
 
@@ -480,8 +662,23 @@ app.options('*', (req, res) => {
   res.sendStatus(200);
 });
 
-app.use(express.json({ limit: '10mb' }));
-app.use(express.urlencoded({ extended: true }));
+// JSON & URL Encoded Parsing with size limits
+app.use(express.json({ 
+  limit: '10mb',
+  verify: (req, res, buf) => {
+    // حماية من JSON Bombs
+    try {
+      JSON.parse(buf);
+    } catch (e) {
+      res.status(400).json({
+        status: 'error',
+        message: 'JSON غير صحيح'
+      });
+      throw new Error('Invalid JSON');
+    }
+  }
+}));
+app.use(express.urlencoded({ extended: true, limit: '10mb' }));
 
 app.use(cors({
   origin: function (origin, callback) {
@@ -498,8 +695,12 @@ app.use(cors({
     if (corsOrigin) {
       // دعم عدة أصول مفصولة بفاصلة
       allowedOrigins = corsOrigin.split(',').map(origin => origin.trim());
+    } else if (isProduction) {
+      // في الإنتاج، يجب تعيين CORS_ORIGIN
+      allowedOrigins = [];
+      logger.warn('⚠️ CORS_ORIGIN غير معرّف في الإنتاج');
     } else {
-      // القائمة الافتراضية للتطوير
+      // القائمة الافتراضية للتطوير فقط
       allowedOrigins = [
         'http://localhost:3000', 
         'http://localhost:19006', 
@@ -509,13 +710,17 @@ app.use(cors({
       ];
     }
     
-    // السماح بطلبات بدون origin (مثل Postman، أو من Railway health checks، أو file://)
+    // السماح بطلبات بدون origin (لـ Railway health checks فقط في الإنتاج)
     if (!origin || origin === 'null') {
+      if (isProduction) {
+        // في الإنتاج، نسمح فقط لـ Railway health checks
+        return callback(null, true);
+      }
       return callback(null, true);
     }
     
     // التحقق من الأصول المسموحة
-    // السماح أيضاً بأي domain من Railway (.railway.app)
+    // السماح بأي domain من Railway (.railway.app)
     const isRailwayDomain = origin.includes('.railway.app');
     const isAllowed = allowedOrigins.some(allowed => {
       // دعم wildcard patterns
@@ -527,17 +732,19 @@ app.use(cors({
       return origin === allowed;
     });
     
-    // السماح بـ localhost و 127.0.0.1 على أي منفذ
-    const isLocalhost = origin.startsWith('http://localhost:') || 
-                        origin.startsWith('http://127.0.0.1:') ||
-                        origin.startsWith('http://192.168.') ||
-                        origin.startsWith('http://10.0.') ||
-                        origin.startsWith('http://172.');
+    // السماح بـ localhost فقط في التطوير
+    const isLocalhost = !isProduction && (
+      origin.startsWith('http://localhost:') || 
+      origin.startsWith('http://127.0.0.1:') ||
+      origin.startsWith('http://192.168.') ||
+      origin.startsWith('http://10.0.') ||
+      origin.startsWith('http://172.')
+    );
     
     if (isAllowed || isRailwayDomain || isLocalhost) {
       callback(null, true);
     } else {
-      console.warn(`⚠️ CORS: Origin غير مسموح: ${origin}`);
+      logger.warn(`⚠️ CORS: Origin غير مسموح: ${origin}`);
       callback(new Error('Not allowed by CORS'));
     }
   },
@@ -641,7 +848,7 @@ app.post('/api/auth/register', validateRegistration, async (req, res) => {
     });
 
   } catch (error) {
-    console.error('خطأ في التسجيل:', error);
+    logger.error('خطأ في التسجيل:', error);
     res.status(500).json({
       status: 'error',
       message: 'خطأ في إنشاء الحساب',
@@ -703,7 +910,7 @@ app.post('/api/auth/login', validateLogin, async (req, res) => {
     });
 
   } catch (error) {
-    console.error('خطأ في تسجيل الدخول:', error);
+    logger.error('خطأ في تسجيل الدخول:', error);
     res.status(500).json({
       status: 'error',
       message: 'خطأ في تسجيل الدخول',
@@ -745,7 +952,7 @@ app.post('/api/auth/verify-token', async (req, res) => {
     });
 
   } catch (error) {
-    console.error('خطأ في التحقق من الرمز:', error);
+    logger.error('خطأ في التحقق من الرمز:', error);
     res.status(401).json({
       status: 'error',
       message: 'الرمز المميز غير صالح'
@@ -791,7 +998,7 @@ app.put('/api/auth/profile', async (req, res) => {
     });
 
   } catch (error) {
-    console.error('خطأ في تحديث الملف الشخصي:', error);
+    logger.error('خطأ في تحديث الملف الشخصي:', error);
     res.status(500).json({
       status: 'error',
       message: 'خطأ في تحديث الملف الشخصي',
@@ -883,7 +1090,7 @@ app.get('/api/properties', async (req, res) => {
     });
 
   } catch (error) {
-    console.error('خطأ في الحصول على العقارات:', error);
+    logger.error('خطأ في الحصول على العقارات:', error);
     res.status(500).json({
       status: 'error',
       message: 'خطأ في الحصول على العقارات',
@@ -915,7 +1122,7 @@ app.get('/api/properties/:id', async (req, res) => {
     });
 
   } catch (error) {
-    console.error('خطأ في الحصول على العقار:', error);
+    logger.error('خطأ في الحصول على العقار:', error);
     res.status(500).json({
       status: 'error',
       message: 'خطأ في الحصول على العقار',
@@ -952,7 +1159,7 @@ app.post('/api/properties', authenticateToken, validateProperty, async (req, res
     });
 
   } catch (error) {
-    console.error('خطأ في إضافة العقار:', error);
+    logger.error('خطأ في إضافة العقار:', error);
     res.status(500).json({
       status: 'error',
       message: 'خطأ في إضافة العقار',
@@ -998,7 +1205,7 @@ app.put('/api/properties/:id', authenticateToken, async (req, res) => {
     });
 
   } catch (error) {
-    console.error('خطأ في تحديث العقار:', error);
+    logger.error('خطأ في تحديث العقار:', error);
     res.status(500).json({
       status: 'error',
       message: 'خطأ في تحديث العقار',
@@ -1029,7 +1236,7 @@ app.delete('/api/properties/:id', authenticateToken, async (req, res) => {
     });
 
   } catch (error) {
-    console.error('خطأ في حذف العقار:', error);
+    logger.error('خطأ في حذف العقار:', error);
     res.status(500).json({
       status: 'error',
       message: 'خطأ في حذف العقار',
@@ -1067,7 +1274,7 @@ app.get('/api/properties/user/my-properties', authenticateToken, async (req, res
     });
 
   } catch (error) {
-    console.error('خطأ في الحصول على عقارات المستخدم:', error);
+    logger.error('خطأ في الحصول على عقارات المستخدم:', error);
     res.status(500).json({
       status: 'error',
       message: 'خطأ في الحصول على عقاراتك',
@@ -1103,7 +1310,7 @@ app.get('/api/users/profile', authenticateToken, async (req, res) => {
     });
 
   } catch (error) {
-    console.error('خطأ في الحصول على الملف الشخصي:', error);
+    logger.error('خطأ في الحصول على الملف الشخصي:', error);
     res.status(500).json({
       status: 'error',
       message: 'خطأ في الحصول على الملف الشخصي',
@@ -1146,7 +1353,7 @@ app.put('/api/users/profile', authenticateToken, async (req, res) => {
     });
 
   } catch (error) {
-    console.error('خطأ في تحديث الملف الشخصي:', error);
+    logger.error('خطأ في تحديث الملف الشخصي:', error);
     res.status(500).json({
       status: 'error',
       message: 'خطأ في تحديث الملف الشخصي',
@@ -1172,7 +1379,7 @@ app.delete('/api/users/account', authenticateToken, async (req, res) => {
     });
 
   } catch (error) {
-    console.error('خطأ في حذف الحساب:', error);
+    logger.error('خطأ في حذف الحساب:', error);
     res.status(500).json({
       status: 'error',
       message: 'خطأ في حذف الحساب',
@@ -1220,7 +1427,7 @@ app.get('/api/users/stats', authenticateToken, async (req, res) => {
     });
 
   } catch (error) {
-    console.error('خطأ في الحصول على الإحصائيات:', error);
+    logger.error('خطأ في الحصول على الإحصائيات:', error);
     res.status(500).json({
       status: 'error',
       message: 'خطأ في الحصول على الإحصائيات',
@@ -1272,7 +1479,7 @@ app.get('/api/users/search', async (req, res) => {
     });
 
   } catch (error) {
-    console.error('خطأ في البحث عن المستخدمين:', error);
+    logger.error('خطأ في البحث عن المستخدمين:', error);
     res.status(500).json({
       status: 'error',
       message: 'خطأ في البحث عن المستخدمين',
@@ -1295,7 +1502,7 @@ app.get('/api/admin/users', authenticateToken, requireAdmin, async (req, res) =>
       data: users
     });
   } catch (error) {
-    console.error('خطأ في جلب المستخدمين:', error);
+    logger.error('خطأ في جلب المستخدمين:', error);
     res.status(500).json({
       status: 'error',
       message: 'خطأ في جلب المستخدمين'
@@ -1324,7 +1531,7 @@ app.patch('/api/admin/users/:userId/toggle-status', authenticateToken, requireAd
       data: { isActive: user.isActive }
     });
   } catch (error) {
-    console.error('خطأ في تغيير حالة المستخدم:', error);
+    logger.error('خطأ في تغيير حالة المستخدم:', error);
     res.status(500).json({
       status: 'error',
       message: 'خطأ في تغيير حالة المستخدم'
@@ -1414,7 +1621,7 @@ app.get('/api/admin/properties', authenticateToken, requireAdmin, async (req, re
       data: propertiesWithDetails
     });
   } catch (error) {
-    console.error('خطأ في جلب العقارات:', error);
+    logger.error('خطأ في جلب العقارات:', error);
     res.status(500).json({
       status: 'error',
       message: 'خطأ في جلب العقارات',
@@ -1467,7 +1674,7 @@ app.patch('/api/admin/properties/:propertyId/status', authenticateToken, require
       }
     });
   } catch (error) {
-    console.error('خطأ في تحديث حالة العقار:', error);
+    logger.error('خطأ في تحديث حالة العقار:', error);
     res.status(500).json({
       status: 'error',
       message: 'خطأ في تحديث حالة العقار',
@@ -1496,7 +1703,7 @@ app.delete('/api/admin/properties/:propertyId', authenticateToken, requireAdmin,
       message: 'تم حذف العقار بنجاح'
     });
   } catch (error) {
-    console.error('خطأ في حذف العقار:', error);
+    logger.error('خطأ في حذف العقار:', error);
     res.status(500).json({
       status: 'error',
       message: 'خطأ في حذف العقار'
@@ -1551,7 +1758,7 @@ app.get('/api/admin/stats', authenticateToken, requireAdmin, async (req, res) =>
       }
     });
   } catch (error) {
-    console.error('خطأ في جلب الإحصائيات:', error);
+    logger.error('خطأ في جلب الإحصائيات:', error);
     res.status(500).json({
       status: 'error',
       message: 'خطأ في جلب الإحصائيات'
@@ -1563,12 +1770,32 @@ app.get('/api/admin/stats', authenticateToken, requireAdmin, async (req, res) =>
 // ERROR HANDLERS
 // ============================================
 
+// Global Error Handler - معالجة أفضل للأخطاء
 app.use((err, req, res, next) => {
-  console.error('خطأ في الخادم:', err);
-  res.status(500).json({
+  // تسجيل الخطأ بشكل آمن
+  logger.error('خطأ في الخادم:', {
+    message: err.message,
+    stack: isProduction ? undefined : err.stack, // لا نعرض Stack في الإنتاج
+    path: req.path,
+    method: req.method,
+    ip: req.ip
+  });
+
+  // لا نعرض تفاصيل الخطأ في الإنتاج
+  const errorMessage = isProduction 
+    ? 'حدث خطأ داخلي في الخادم' 
+    : err.message;
+
+  // تحديد كود الحالة المناسب
+  const statusCode = err.statusCode || err.status || 500;
+
+  res.status(statusCode).json({
     status: 'error',
-    message: 'خطأ داخلي في الخادم',
-    error: process.env.NODE_ENV === 'development' ? err.message : 'خطأ غير معروف'
+    message: errorMessage,
+    ...(isProduction ? {} : { 
+      error: err.message,
+      stack: err.stack 
+    })
   });
 });
 
@@ -1585,19 +1812,19 @@ app.use('*', (req, res) => {
 
 const startServer = async () => {
   try {
-    console.log('🚀 بدء تشغيل الخادم...');
+    logger.log('🚀 بدء تشغيل الخادم...');
     
     // الاتصال بقاعدة البيانات أولاً (مهم جداً!)
     const dbConnected = await connectDatabase();
     
     if (!dbConnected) {
-      console.error('❌ فشل الاتصال بقاعدة البيانات. الخادم لن يبدأ.');
+      logger.error('❌ فشل الاتصال بقاعدة البيانات. الخادم لن يبدأ.');
       process.exit(1);
     }
     
     // الانتظار قليلاً للتأكد من اكتمال الاتصال
     if (mongoose.connection.readyState !== 1) {
-      console.log('⏳ انتظار اكتمال الاتصال بقاعدة البيانات...');
+      logger.log('⏳ انتظار اكتمال الاتصال بقاعدة البيانات...');
       await new Promise((resolve) => {
         const checkConnection = () => {
           if (mongoose.connection.readyState === 1) {
@@ -1611,26 +1838,32 @@ const startServer = async () => {
     }
     
     app.listen(PORT, '0.0.0.0', () => {
-      console.log(`✅ الخادم يعمل على المنفذ ${PORT}`);
-      console.log(`🌐 رابط الخادم: http://localhost:${PORT}`);
-      console.log(`📊 حالة قاعدة البيانات: ${mongoose.connection.readyState === 1 ? '✅ متصل' : '❌ غير متصل'}`);
-      console.log('🔗 المسارات المتاحة:');
-      console.log('   - POST /api/auth/register - تسجيل مستخدم جديد');
-      console.log('   - POST /api/auth/login - تسجيل الدخول');
-      console.log('   - GET /api/properties - الحصول على العقارات');
-      console.log('   - POST /api/properties - إضافة عقار جديد');
-      console.log('   - GET /api/health - فحص صحة الخادم');
+      logger.log(`✅ الخادم يعمل على المنفذ ${PORT}`);
+      if (!isProduction) {
+        logger.log(`🌐 رابط الخادم: http://localhost:${PORT}`);
+      }
+      logger.log(`📊 حالة قاعدة البيانات: ${mongoose.connection.readyState === 1 ? '✅ متصل' : '❌ غير متصل'}`);
+      
+      // عرض المسارات فقط في التطوير
+      if (!isProduction) {
+        logger.log('🔗 المسارات المتاحة:');
+        logger.log('   - POST /api/auth/register - تسجيل مستخدم جديد');
+        logger.log('   - POST /api/auth/login - تسجيل الدخول');
+        logger.log('   - GET /api/properties - الحصول على العقارات');
+        logger.log('   - POST /api/properties - إضافة عقار جديد');
+        logger.log('   - GET /api/health - فحص صحة الخادم');
+      }
     });
   } catch (error) {
-    console.error('❌ فشل في بدء الخادم:', error.message);
+    logger.error('❌ فشل في بدء الخادم:', error.message);
     process.exit(1);
   }
 };
 
 process.on('SIGINT', async () => {
-  console.log('\n🛑 إيقاف الخادم...');
+  logger.log('\n🛑 إيقاف الخادم...');
   await mongoose.connection.close();
-  console.log('✅ تم إيقاف الخادم بنجاح');
+  logger.log('✅ تم إيقاف الخادم بنجاح');
   process.exit(0);
 });
 
