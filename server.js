@@ -603,6 +603,10 @@ const requireAdmin = async (req, res, next) => {
 // SECURITY MIDDLEWARE
 // ============================================
 
+// Trust Proxy - مهم جداً للـ Cloud Providers (Railway, Heroku, etc.)
+// يسمح لـ Express بالثقة في X-Forwarded-For header من reverse proxy
+app.set('trust proxy', true);
+
 // Helmet - Security Headers
 app.use(helmet({
   contentSecurityPolicy: isProduction ? undefined : false, // تعطيل في التطوير لتسهيل التطوير
