@@ -605,7 +605,8 @@ const requireAdmin = async (req, res, next) => {
 
 // Trust Proxy - مهم جداً للـ Cloud Providers (Railway, Heroku, etc.)
 // يسمح لـ Express بالثقة في X-Forwarded-For header من reverse proxy
-app.set('trust proxy', true);
+// نستخدم 1 بدلاً من true للثقة فقط بالبروكسي الأول (Railway) - هذا أكثر أماناً
+app.set('trust proxy', 1);
 
 // Helmet - Security Headers
 app.use(helmet({
